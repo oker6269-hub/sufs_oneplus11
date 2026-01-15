@@ -1,0 +1,263 @@
+name: Build OnePlus 11 Kernel (方案A - 强制内建)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libelf-dev dwarves
+
+    - name: Download Neutron Clang
+      run: |
+        mkdir -p clang
+        cd clang
+        bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S
+        echo "PATH=$PWD/bin:$PATH" >> $GITHUB_ENV
+
+    - name: Clone Kernel Source
+      run: |
+        git clone --depth=1 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550 -b 14.0 android-kernel
+
+    - name: Integrate KernelSU and SuSFS
+      run: |
+        cd android-kernel
+        echo ">>> Integrating KernelSU-Next..."
+        rm -rf KernelSU-Next drivers/kernelsu
+        
+        git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git
+        mv KernelSU-Next/kernel drivers/kernelsu
+        
+        if ! grep -q "drivers/kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+        fi
+        if ! grep -q "drivers/kernelsu" drivers/Kconfig; then
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        fi
+        
+        echo ">>> Downloading SuSFS kernel patches for 5.15..."
+        rm -rf susfs4ksu
+        git clone -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git
+        
+        cp susfs4ksu/kernel_patches/fs/susfs.c fs/
+        cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+        cp susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
+        
+        echo ">>> Applying SuSFS kernel patches..."
+        SUSFS_PATCH=$(find susfs4ksu/kernel_patches -maxdepth 1 -name "50_add_susfs*.patch" | head -1)
+        if [ -n "$SUSFS_PATCH" ]; then
+            echo "Found patch: $SUSFS_PATCH"
+            patch -p1 < "$SUSFS_PATCH" || echo "Patch conflict (may already be applied)"
+        fi
+        
+        echo ">>> Manually fixing KernelSU-Next missing includes..."
+        cd drivers/kernelsu
+        sed -i '1i #include <linux/susfs.h>' ksu.c
+        sed -i '1i #include <linux/susfs.h>' allowlist.c
+        
+        cd ../..
+        echo ">>> Modifying Defconfig..."
+        DEFCONFIG="arch/arm64/configs/vendor/salami_defconfig"
+        echo "CONFIG_KSU=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS_AVC_SPOOF=y" >> $DEFCONFIG
+        echo ">>> Defconfig done"
+
+    - name: Fix OPlus Driver Compatibility
+      run: |
+        cd android-kernel
+        echo ">>> Fixing kernel 5.10+ API compatibility issues..."
+        
+        OPLUS_PROJECT="drivers/soc/oplus/boot/oplus_project/qcom/oplus_project.c"
+        if [ -f "$OPLUS_PROJECT" ]; then
+            echo "Creating stub for oplus_project driver..."
+            echo '// SPDX-License-Identifier: GPL-2.0-only' > "$OPLUS_PROJECT"
+            echo '#include <linux/module.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/kernel.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/init.h>' >> "$OPLUS_PROJECT"
+            echo '#include <linux/proc_fs.h>' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_project(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_project);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_PCB_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_PCB_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_Modem_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_Modem_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_Operator_Version(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_Operator_Version);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_dtsiNo(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_dtsiNo);' >> "$OPLUS_PROJECT"
+            echo 'unsigned int get_audio(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_audio);' >> "$OPLUS_PROJECT"
+            echo 'int get_serialID(void) { return 0; }' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(get_serialID);' >> "$OPLUS_PROJECT"
+            echo 'struct proc_dir_entry *oplus_info = NULL;' >> "$OPLUS_PROJECT"
+            echo 'EXPORT_SYMBOL(oplus_info);' >> "$OPLUS_PROJECT"
+            echo 'static int __init oplus_project_init(void) { oplus_info = proc_mkdir("oplusVersion", NULL); return 0; }' >> "$OPLUS_PROJECT"
+            echo 'static void __exit oplus_project_exit(void) { if (oplus_info) proc_remove(oplus_info); }' >> "$OPLUS_PROJECT"
+            echo 'module_init(oplus_project_init);' >> "$OPLUS_PROJECT"
+            echo 'module_exit(oplus_project_exit);' >> "$OPLUS_PROJECT"
+            echo 'MODULE_LICENSE("GPL v2");' >> "$OPLUS_PROJECT"
+            echo "Created stub driver"
+        fi
+        
+        SENSOR_MAKEFILE="drivers/soc/oplus/sensor/Makefile"
+        if [ -f "$SENSOR_MAKEFILE" ]; then
+            echo "Disabling all oplus_sensor drivers in Makefile..."
+            sed -i 's/^obj-/# obj-/g' "$SENSOR_MAKEFILE"
+            echo "Disabled all oplus sensor drivers"
+        fi
+        
+        echo ">>> Fixing proc_ops for other oplus files..."
+        for f in $(find drivers/soc/oplus -name "*.c" 2>/dev/null); do
+            if grep -q "struct file_operations.*_fops" "$f" 2>/dev/null; then
+                sed -i 's/struct file_operations/struct proc_ops/g' "$f"
+                sed -i 's/\.read\s*=/.proc_read =/g' "$f"
+                sed -i 's/\.write\s*=/.proc_write =/g' "$f"
+                sed -i 's/\.open\s*=/.proc_open =/g' "$f"
+                sed -i 's/\.release\s*=/.proc_release =/g' "$f"
+                sed -i 's/\.llseek\s*=/.proc_lseek =/g' "$f"
+                sed -i '/\.owner\s*=\s*THIS_MODULE/d' "$f"
+                echo "Fixed: $f"
+            fi
+        done
+        echo ">>> OPlus driver fixes done"
+
+    - name: Compile Kernel
+      run: |
+        cd android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        export CC=clang
+        echo ">>> [方案A] 强制关键驱动内建 (=y)"
+        
+        make O=out gki_defconfig
+        
+        echo ">>> Listing available vendor configs..."
+        ls -la arch/arm64/configs/vendor/*.config 2>/dev/null || echo "No vendor configs found in vendor/"
+        ls -la arch/arm64/configs/vendor/oplus/*.config 2>/dev/null || echo "No vendor configs found in vendor/oplus/"
+        
+        KALAMA_CFG="arch/arm64/configs/vendor/kalama_GKI.config"
+        if [ -f "$KALAMA_CFG" ]; then
+            echo ">>> [FOUND] Merging $KALAMA_CFG ($(wc -c < $KALAMA_CFG) bytes)..."
+            ./scripts/kconfig/merge_config.sh -m -O out out/.config "$KALAMA_CFG"
+        fi
+        
+        OPLUS_KALAMA_CFG="arch/arm64/configs/vendor/oplus/kalama_GKI.config"
+        if [ -f "$OPLUS_KALAMA_CFG" ]; then
+            echo ">>> [FOUND] Merging $OPLUS_KALAMA_CFG ($(wc -c < $OPLUS_KALAMA_CFG) bytes)..."
+            ./scripts/kconfig/merge_config.sh -m -O out out/.config "$OPLUS_KALAMA_CFG"
+        fi
+        
+        SALAMI_CFG="arch/arm64/configs/vendor/oplus/salami.config"
+        if [ -f "$SALAMI_CFG" ]; then
+            echo ">>> [FOUND] Merging $SALAMI_CFG ($(wc -c < $SALAMI_CFG) bytes)..."
+            ./scripts/kconfig/merge_config.sh -m -O out out/.config "$SALAMI_CFG"
+        fi
+        
+        DEBUGFS_CFG="arch/arm64/configs/vendor/debugfs.config"
+        if [ -f "$DEBUGFS_CFG" ]; then
+            echo ">>> [FOUND] Merging $DEBUGFS_CFG ($(wc -c < $DEBUGFS_CFG) bytes)..."
+            ./scripts/kconfig/merge_config.sh -m -O out out/.config "$DEBUGFS_CFG"
+        fi
+        
+        echo ">>> [方案A] 强制关键驱动内建..."
+        # 强制这些驱动编译进内核，不依赖 vendor_boot 的模块
+        ./scripts/config --file out/.config --enable SCSI_UFS_QCOM
+        ./scripts/config --file out/.config --enable SCSI_UFS_CRYPTO_QTI
+        ./scripts/config --file out/.config --enable BLK_DEV_LOOP
+        ./scripts/config --file out/.config --enable COMMON_CLK_QCOM
+        ./scripts/config --file out/.config --enable QCOM_WATCHDOG
+        ./scripts/config --file out/.config --enable INPUT_QPNP_POWER_ON
+        ./scripts/config --file out/.config --enable USB_DWC3_MSM
+        ./scripts/config --file out/.config --enable USB_MSM_SSPHY_QMP
+        ./scripts/config --file out/.config --enable QCOM_SMEM
+        
+        ./scripts/config --file out/.config --enable HWSPINLOCK
+        ./scripts/config --file out/.config --enable HWSPINLOCK_QCOM
+        ./scripts/config --file out/.config --enable OPLUS_SYSTEM_KERNEL
+        ./scripts/config --file out/.config --enable OPLUS_SYSTEM_KERNEL_QCOM
+        ./scripts/config --file out/.config --enable OPLUS_FEATURE_OPROJECT
+        ./scripts/config --file out/.config --enable OVERLAY_FS
+        
+        make O=out olddefconfig
+        
+        echo ">>> Verifying config..."
+        grep -E "CONFIG_SCSI_UFS_QCOM=|CONFIG_USB_DWC3_MSM=|CONFIG_COMMON_CLK_QCOM=|CONFIG_KSU=" out/.config || true
+        
+        echo ">>> Building kernel and DTBs..."
+        make -j"$(nproc --all)" O=out LLVM=1 LLVM_IAS=1 Image dtbs
+
+    - name: Package with AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3
+        cd AnyKernel3
+        
+        cat > anykernel.sh << 'EOF'
+### AnyKernel3 Ramdisk Mod Script
+## osm0sis @ xda-developers
+
+### AnyKernel setup
+properties() { '
+kernel.string=KernelSU-Next-SuSFS for OnePlus 11 (方案A-强制内建)
+do.devicecheck=0
+do.modules=0
+do.systemless=0
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=
+device.name2=
+device.name3=
+device.name4=
+device.name5=
+supported.versions=
+supported.patchlevels=
+supported.vendorpatchlevels=
+'; } # end properties
+
+### AnyKernel install
+block=boot
+is_slot_device=auto
+ramdisk_compression=auto
+patch_vbmeta_flag=auto
+no_magisk_check=1
+
+. tools/ak3-core.sh
+
+split_boot
+if [ -f "split_img/ramdisk.cpio" ]; then
+    unpack_ramdisk
+    write_boot
+else
+    flash_boot
+fi
+EOF
+        
+        cp ../android-kernel/out/arch/arm64/boot/Image .
+        rm -rf .git .github README.md LICENSE
+        zip -r9 ../OnePlus11-Kernel-A-ForceBuiltin.zip *
+        
+    - name: Upload Kernel Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: OnePlus11-Kernel-A-ForceBuiltin
+        path: OnePlus11-Kernel-A-ForceBuiltin.zip
+        if-no-files-found: warn
